@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Helmet Detection Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="header">
+        <div>
+          <h1>Helmet Detection Dashboard</h1>
+        </div>
+        <div class="model-state {% if model_ready %}ready{% else %}missing{% endif %}">
+          {% if model_ready %}Model ready{% else %}Missing model{% endif %}
+        </div>
+      </section>
+
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <div class="notice">
+            {% for message in messages %}
+              <p>{{ message }}</p>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+
+      {% if not model_ready %}
+        <section class="notice">
+          Place your trained Colab model at <strong>{{ model_path }}</strong>, or run with
+          <strong>MODEL_PATH=C:\path\to\best.pt python app.py</strong>.
+        </section>
+      {% endif %}
+
+      <section class="upload-section {% if not result %}upload-section-empty{% endif %}">
+        <form method="post" enctype="multipart/form-data" class="upload-form" id="uploadForm">
+          <label class="drop-zone" id="dropZone" for="mediaInput" tabindex="0">
+            <input class="file-input" id="mediaInput" type="file" name="file" accept="image/*,video/*" required>
+            <span class="drop-zone-title">Drop image or video here</span>
+            <span class="drop-zone-copy">or click to browse</span>
+            <span class="file-preview" id="filePreview">JPG, PNG, BMP, WEBP, MP4, AVI, MOV, MKV, or WEBM</span>
+          </label>
+          <p class="processing-state" id="processingState" hidden>Processing...</p>
+        </form>
+      </section>
+
+      {% if result %}
+        <div id="resultArea">
+        <section class="metrics">
+          <article>
+            <span>Riders</span>
+            <strong>{{ result.summary.riders }}</strong>
+          </article>
+          <article>
+            <span>With Helmet</span>
+            <strong>{{ result.summary.with_helmet }}</strong>
+          </article>
+          <article>
+            <span>Without Helmet</span>
+            <strong>{{ result.summary.without_helmet }}</strong>
+          </article>
+          <article>
+            <span>Helmets</span>
+            <strong>{{ result.summary.helmets }}</strong>
+          </article>
+          <article>
+            <span>Humans</span>
+            <strong>{{ result.summary.humans }}</strong>
+          </article>
+          <article>
+            <span>Motorcycles</span>
+            <strong>{{ result.summary.motorcycles }}</strong>
+          </article>
+        </section>
+
+        <section class="result-grid">
+          <div class="media-panel">
+            {% if result.kind == "video" %}
+              <video controls playsinline preload="metadata">
+                <source src="{{ result.output_url }}" type="video/mp4">
+              </video>
+            {% else %}
+              <div class="image-stage">
+                <img src="{{ result.output_url }}" alt="Detection result">
+                {% for box in result.hover_boxes %}
+                  <div
+                    class="detection-hotspot detection-hotspot-{{ box.kind }}"
+                    style="left: {{ box.left }}%; top: {{ box.top }}%; width: {{ box.width }}%; height: {{ box.height }}%;"
+                    tabindex="0"
+                    aria-label="{{ box.label }}"
+                  >
+                    <div class="detection-tooltip">
+                      <strong>{{ box.label }}</strong>
+                      {% if box.metrics %}
+                        <div class="tooltip-score-list">
+                          {% for metric in box.metrics %}
+                            <div class="tooltip-score {% if metric.passed %}tooltip-score-passed{% else %}tooltip-score-failed{% endif %}">
+                              <div class="tooltip-score-header">
+                                <span>{{ metric.label }}</span>
+                                <span>{{ "%.2f"|format(metric.score) }} / {{ "%.2f"|format(metric.threshold) }}</span>
+                              </div>
+                              <div
+                                class="tooltip-score-track"
+                                style="--score: {{ metric.score_percent }}%; --threshold: {{ metric.threshold_percent }}%;"
+                              >
+                                <span class="tooltip-score-fill"></span>
+                                <span class="tooltip-score-threshold"></span>
+                              </div>
+                            </div>
+                          {% endfor %}
+                        </div>
+                      {% endif %}
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+          <aside class="panel controls-panel">
+            <section class="legend-panel" aria-label="Detection color guide">
+              <h2>Color Guide</h2>
+              <p class="legend-copy">Hover a box on the image to see its label and scores.</p>
+              <div class="legend-list">
+                <div class="legend-item">
+                  <span class="legend-swatch legend-swatch-helmet"></span>
+                  <div>
+                    <strong>Helmet</strong>
+                  </div>
+                </div>
+                <div class="legend-item">
+                  <span class="legend-swatch legend-swatch-human"></span>
+                  <div>
+                    <strong>Human</strong>
+                  </div>
+                </div>
+                <div class="legend-item">
+                  <span class="legend-swatch legend-swatch-motorcycle"></span>
+                  <div>
+                    <strong>Motorcycle</strong>
+                  </div>
+                </div>
+                <div class="legend-item">
+                  <span class="legend-swatch legend-swatch-rider-safe"></span>
+                  <div>
+                    <strong>Rider With Helmet</strong>
+                  </div>
+                </div>
+                <div class="legend-item">
+                  <span class="legend-swatch legend-swatch-rider-danger"></span>
+                  <div>
+                    <strong>Rider Without Helmet</strong>
+                  </div>
+                </div>
+              </div>
+            </section>
+            <form method="post" class="confidence-form" id="confidenceForm">
+              <input type="hidden" name="existing_file" value="{{ result.input_name }}">
+              <label>
+                <span>Confidence threshold: <strong id="confidenceValue">{{ "%.2f"|format(result.confidence) }}</strong></span>
+                <input
+                  id="confidenceSlider"
+                  type="range"
+                  name="confidence"
+                  min="0.05"
+                  max="0.95"
+                  step="0.05"
+                  value="{{ "%.2f"|format(result.confidence) }}"
+                >
+              </label>
+              <label>
+                <span>Rider score threshold: <strong id="riderThresholdValue">{{ "%.2f"|format(result.rider_score_threshold) }}</strong></span>
+                <input
+                  id="riderThresholdSlider"
+                  type="range"
+                  name="rider_score_threshold"
+                  min="0.00"
+                  max="1.50"
+                  step="0.01"
+                  value="{{ "%.2f"|format(result.rider_score_threshold) }}"
+                >
+              </label>
+              <label>
+                <span>Helmet score threshold: <strong id="helmetThresholdValue">{{ "%.2f"|format(result.helmet_score_threshold) }}</strong></span>
+                <input
+                  id="helmetThresholdSlider"
+                  type="range"
+                  name="helmet_score_threshold"
+                  min="0.00"
+                  max="1.50"
+                  step="0.01"
+                  value="{{ "%.2f"|format(result.helmet_score_threshold) }}"
+                >
+              </label>
+              <p class="processing-state confidence-processing-state" id="confidenceProcessingState" hidden>Updating result...</p>
+            </form>
+          </aside>
+        </section>
+        </div>
+      {% endif %}
+    </main>
+    <script>
+      const confidenceValueIds = {
+        confidenceSlider: "confidenceValue",
+        riderThresholdSlider: "riderThresholdValue",
+        helmetThresholdSlider: "helmetThresholdValue",
+      };
+
+      const updateConfidenceLabel = (slider) => {
+        const value = document.getElementById(confidenceValueIds[slider.id]);
+        if (value) {
+          value.textContent = Number(slider.value).toFixed(2);
+        }
+      };
+
+      Object.keys(confidenceValueIds).forEach((sliderId) => {
+        const slider = document.getElementById(sliderId);
+        if (slider) {
+          slider.addEventListener("input", () => updateConfidenceLabel(slider));
+          updateConfidenceLabel(slider);
+        }
+      });
+
+      const uploadForm = document.getElementById("uploadForm");
+      const confidenceForm = document.getElementById("confidenceForm");
+      const mediaInput = document.getElementById("mediaInput");
+      const dropZone = document.getElementById("dropZone");
+      const filePreview = document.getElementById("filePreview");
+      const processingState = document.getElementById("processingState");
+      const confidenceProcessingState = document.getElementById("confidenceProcessingState");
+      const resultArea = document.getElementById("resultArea");
+      const clearResultArea = () => {
+        if (resultArea) {
+          resultArea.hidden = true;
+        }
+      };
+      const scrollToResultArea = () => {
+        if (!resultArea) {
+          return;
+        }
+        const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        resultArea.scrollIntoView({
+          behavior: prefersReducedMotion ? "auto" : "smooth",
+          block: "start",
+        });
+      };
+      window.addEventListener("load", scrollToResultArea);
+      const submitForm = (form) => {
+        if (form.requestSubmit) {
+          form.requestSubmit();
+        } else {
+          form.submit();
+        }
+      };
+      const submitConfidenceForm = () => {
+        if (!confidenceForm) {
+          return;
+        }
+        if (confidenceProcessingState) {
+          confidenceProcessingState.hidden = false;
+        }
+        window.requestAnimationFrame(() => submitForm(confidenceForm));
+      };
+      Object.keys(confidenceValueIds).forEach((sliderId) => {
+        const slider = document.getElementById(sliderId);
+        if (slider) {
+          slider.addEventListener("change", submitConfidenceForm);
+        }
+      });
+      const formatBytes = (bytes) => {
+        if (!bytes) {
+          return "0 B";
+        }
+        const units = ["B", "KB", "MB", "GB"];
+        const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+        const value = bytes / Math.pow(1024, exponent);
+        return `${value.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+      };
+      const supportedFormats = "JPG, PNG, BMP, WEBP, MP4, AVI, MOV, MKV, or WEBM";
+      const isSupportedFile = (file) => {
+        return file && (
+          file.type.startsWith("image/") ||
+          file.type.startsWith("video/") ||
+          /\.(jpe?g|png|bmp|webp|mp4|avi|mov|mkv|webm)$/i.test(file.name)
+        );
+      };
+      const mediaKind = (file) => {
+        if (file.type.startsWith("video/") || /\.(mp4|avi|mov|mkv|webm)$/i.test(file.name)) {
+          return "video";
+        }
+        return "image";
+      };
+      const handleSelectedFile = () => {
+        if (!mediaInput || !mediaInput.files.length) {
+          if (filePreview) {
+            filePreview.textContent = supportedFormats;
+          }
+          return;
+        }
+
+        const file = mediaInput.files[0];
+        if (!isSupportedFile(file)) {
+          if (filePreview) {
+            filePreview.textContent = "Choose a supported image or video file.";
+          }
+          mediaInput.value = "";
+          return;
+        }
+
+        if (filePreview) {
+          filePreview.textContent = `${file.name} · ${formatBytes(file.size)}`;
+        }
+        clearResultArea();
+        if (processingState) {
+          processingState.textContent = `Processing ${mediaKind(file)}...`;
+          processingState.hidden = false;
+        }
+        window.requestAnimationFrame(() => submitForm(uploadForm));
+      };
+
+      if (mediaInput) {
+        mediaInput.addEventListener("change", handleSelectedFile);
+      }
+
+      if (dropZone) {
+        dropZone.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            mediaInput.click();
+          }
+        });
+
+        ["dragenter", "dragover"].forEach((eventName) => {
+          dropZone.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            dropZone.classList.add("drag-over");
+          });
+        });
+
+        ["dragleave", "drop"].forEach((eventName) => {
+          dropZone.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            dropZone.classList.remove("drag-over");
+          });
+        });
+
+        dropZone.addEventListener("drop", (event) => {
+          const files = event.dataTransfer.files;
+          if (files.length) {
+            mediaInput.files = files;
+            handleSelectedFile();
+          }
+        });
+      }
+
+      if (uploadForm) {
+        uploadForm.addEventListener("submit", () => {
+          clearResultArea();
+          if (processingState && mediaInput && mediaInput.files.length) {
+            processingState.textContent = `Processing ${mediaKind(mediaInput.files[0])}...`;
+            processingState.hidden = false;
+          }
+        });
+      }
+    </script>
+  </body>
+</html>
