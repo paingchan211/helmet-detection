@@ -137,6 +137,13 @@ def output_url(output_name: str, output_path: Path) -> str:
     return url_for("static", filename=f"outputs/{output_name}", v=version)
 
 
+def clear_previous_outputs(path: Path) -> None:
+    for existing in OUTPUT_DIR.glob(f"{path.stem}_detected*"):
+        existing.unlink(missing_ok=True)
+    for existing in OUTPUT_DIR.glob(f"{path.stem}_conf_*_detected*"):
+        existing.unlink(missing_ok=True)
+
+
 def _box_key(box: list[float]) -> tuple[int, int, int, int]:
     return tuple(round(v) for v in box)
 
@@ -283,7 +290,8 @@ def process_image(
         helmet_score_threshold,
     )
     height, width = image.shape[:2]
-    output_name = f"{path.stem}_conf_{int(confidence * 100):02d}_detected.jpg"
+    clear_previous_outputs(path)
+    output_name = f"{path.stem}_detected.jpg"
     output_path = OUTPUT_DIR / output_name
     cv2.imwrite(str(output_path), annotated)
 
@@ -387,8 +395,9 @@ def process_video(
         capture.release()
         raise ValueError("Uploaded video has an invalid frame size.")
 
-    output_name = f"{path.stem}_conf_{int(confidence * 100):02d}_detected.mp4"
-    raw_output_name = f"{path.stem}_conf_{int(confidence * 100):02d}_detected_raw.mp4"
+    clear_previous_outputs(path)
+    output_name = f"{path.stem}_detected.mp4"
+    raw_output_name = f"{path.stem}_detected_raw.mp4"
     output_path = OUTPUT_DIR / output_name
     raw_output_path = OUTPUT_DIR / raw_output_name
     writer = cv2.VideoWriter(
