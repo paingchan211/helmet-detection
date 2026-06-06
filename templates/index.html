@@ -34,46 +34,70 @@
         </section>
       {% endif %}
 
-      <section class="upload-section {% if not result %}upload-section-empty{% endif %}">
-        <form method="post" enctype="multipart/form-data" class="upload-form" id="uploadForm">
-          <label class="drop-zone" id="dropZone" for="mediaInput" tabindex="0">
-            <input class="file-input" id="mediaInput" type="file" name="file" accept="image/*,video/*" required>
-            <span class="drop-zone-title">Drop image or video here</span>
-            <span class="drop-zone-copy">or click to browse</span>
+      {% set upload_disabled = job and not result and job.status in ["queued", "processing"] %}
+      <section class="upload-section {% if not result and not job %}upload-section-empty{% endif %}">
+        <form method="post" action="{{ url_for('index') }}" enctype="multipart/form-data" class="upload-form" id="uploadForm">
+          <label class="drop-zone {% if upload_disabled %}drop-zone-disabled{% endif %}" id="dropZone" for="mediaInput" tabindex="{% if upload_disabled %}-1{% else %}0{% endif %}">
+            <input class="file-input" id="mediaInput" type="file" name="file" accept="image/*,video/*" required {% if upload_disabled %}disabled{% endif %}>
+            <span class="drop-zone-title">{% if upload_disabled %}Upload disabled while processing{% else %}Drop image or video here{% endif %}</span>
+            <span class="drop-zone-copy">{% if upload_disabled %}Wait for this request to finish{% else %}or click to browse{% endif %}</span>
             <span class="file-preview" id="filePreview">JPG, PNG, BMP, WEBP, MP4, AVI, MOV, MKV, or WEBM</span>
           </label>
           <p class="processing-state" id="processingState" hidden>Processing...</p>
         </form>
       </section>
 
+      {% if job and not result %}
+        <section
+          class="queue-panel"
+          id="queuePanel"
+          data-status-url="{{ url_for('job_status', job_id=job.id) }}"
+        >
+          <h2>Request Queued</h2>
+          <p id="queueMessage">
+            {% if job.status == "processing" %}
+              Your {{ job.kind }} is being processed now.
+            {% elif job.status == "queued" %}
+              Your {{ job.kind }} is position {{ job.queue_position }} in the queue.
+            {% elif job.status == "failed" %}
+              {{ job.error }}
+            {% else %}
+              Preparing your result...
+            {% endif %}
+          </p>
+        </section>
+      {% endif %}
+
       {% if result %}
         <div id="resultArea">
-        <section class="metrics">
-          <article>
-            <span>Riders</span>
-            <strong>{{ result.summary.riders }}</strong>
-          </article>
-          <article>
-            <span>With Helmet</span>
-            <strong>{{ result.summary.with_helmet }}</strong>
-          </article>
-          <article>
-            <span>Without Helmet</span>
-            <strong>{{ result.summary.without_helmet }}</strong>
-          </article>
-          <article>
-            <span>Helmets</span>
-            <strong>{{ result.summary.helmets }}</strong>
-          </article>
-          <article>
-            <span>Humans</span>
-            <strong>{{ result.summary.humans }}</strong>
-          </article>
-          <article>
-            <span>Motorcycles</span>
-            <strong>{{ result.summary.motorcycles }}</strong>
-          </article>
-        </section>
+        {% if result.kind != "video" %}
+          <section class="metrics">
+            <article>
+              <span>Riders</span>
+              <strong>{{ result.summary.riders }}</strong>
+            </article>
+            <article>
+              <span>With Helmet</span>
+              <strong>{{ result.summary.with_helmet }}</strong>
+            </article>
+            <article>
+              <span>Without Helmet</span>
+              <strong>{{ result.summary.without_helmet }}</strong>
+            </article>
+            <article>
+              <span>Helmets</span>
+              <strong>{{ result.summary.helmets }}</strong>
+            </article>
+            <article>
+              <span>Humans</span>
+              <strong>{{ result.summary.humans }}</strong>
+            </article>
+            <article>
+              <span>Motorcycles</span>
+              <strong>{{ result.summary.motorcycles }}</strong>
+            </article>
+          </section>
+        {% endif %}
 
         <section class="result-grid">
           <div class="media-panel">
@@ -81,6 +105,9 @@
               <video controls playsinline preload="metadata">
                 <source src="{{ result.output_url }}" type="video/mp4">
               </video>
+              <div class="media-actions">
+                <span>{{ "%.1f"|format(result.slowdown_factor) }}x slower</span>
+              </div>
             {% else %}
               <div class="image-stage">
                 <img src="{{ result.output_url }}" alt="Detection result">
@@ -155,7 +182,7 @@
                 </div>
               </div>
             </section>
-            <form method="post" class="confidence-form" id="confidenceForm">
+            <form method="post" action="{{ url_for('index') }}" class="confidence-form" id="confidenceForm">
               <input type="hidden" name="existing_file" value="{{ result.input_name }}">
               <label>
                 <span>Confidence threshold: <strong id="confidenceValue">{{ "%.2f"|format(result.confidence) }}</strong></span>
@@ -230,6 +257,8 @@
       const processingState = document.getElementById("processingState");
       const confidenceProcessingState = document.getElementById("confidenceProcessingState");
       const resultArea = document.getElementById("resultArea");
+      const queuePanel = document.getElementById("queuePanel");
+      const queueMessage = document.getElementById("queueMessage");
       const clearResultArea = () => {
         if (resultArea) {
           resultArea.hidden = true;
@@ -246,6 +275,37 @@
         });
       };
       window.addEventListener("load", scrollToResultArea);
+      const queueStatusText = (status) => {
+        if (status.status === "processing") {
+          return "Your request is being processed now.";
+        }
+        if (status.status === "queued") {
+          return `Your request is position ${status.queue_position} in the queue.`;
+        }
+        if (status.status === "failed") {
+          return status.error || "The request failed.";
+        }
+        return "Preparing your result...";
+      };
+      const pollQueueStatus = () => {
+        if (!queuePanel || !queuePanel.dataset.statusUrl) {
+          return;
+        }
+        fetch(queuePanel.dataset.statusUrl, { headers: { Accept: "application/json" } })
+          .then((response) => response.json())
+          .then((status) => {
+            if (queueMessage) {
+              queueMessage.textContent = queueStatusText(status);
+            }
+            if (status.status === "done" || status.status === "failed") {
+              window.location.reload();
+              return;
+            }
+            window.setTimeout(pollQueueStatus, 1000);
+          })
+          .catch(() => window.setTimeout(pollQueueStatus, 2000));
+      };
+      pollQueueStatus();
       const submitForm = (form) => {
         if (form.requestSubmit) {
           form.requestSubmit();
@@ -278,6 +338,7 @@
         return `${value.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
       };
       const supportedFormats = "JPG, PNG, BMP, WEBP, MP4, AVI, MOV, MKV, or WEBM";
+      const uploadIsDisabled = () => mediaInput && mediaInput.disabled;
       const isSupportedFile = (file) => {
         return file && (
           file.type.startsWith("image/") ||
@@ -292,6 +353,9 @@
         return "image";
       };
       const handleSelectedFile = () => {
+        if (uploadIsDisabled()) {
+          return;
+        }
         if (!mediaInput || !mediaInput.files.length) {
           if (filePreview) {
             filePreview.textContent = supportedFormats;
@@ -325,6 +389,10 @@
 
       if (dropZone) {
         dropZone.addEventListener("keydown", (event) => {
+          if (uploadIsDisabled()) {
+            event.preventDefault();
+            return;
+          }
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             mediaInput.click();
@@ -334,6 +402,9 @@
         ["dragenter", "dragover"].forEach((eventName) => {
           dropZone.addEventListener(eventName, (event) => {
             event.preventDefault();
+            if (uploadIsDisabled()) {
+              return;
+            }
             dropZone.classList.add("drag-over");
           });
         });
@@ -346,6 +417,9 @@
         });
 
         dropZone.addEventListener("drop", (event) => {
+          if (uploadIsDisabled()) {
+            return;
+          }
           const files = event.dataTransfer.files;
           if (files.length) {
             mediaInput.files = files;

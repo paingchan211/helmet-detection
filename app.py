@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import os
+import queue
 import subprocess
+import threading
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 from ultralytics import YOLO
 from werkzeug.utils import secure_filename
 
@@ -29,6 +32,7 @@ ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 ALLOWED_EXTENSIONS = ALLOWED_IMAGE_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS
 DEFAULT_CONFIDENCE = 0.35
 DEFAULT_IMAGE_SIZE = int(os.getenv("YOLO_IMAGE_SIZE", "640"))
+DEFAULT_VIDEO_SLOWDOWN_FACTOR = 2.0
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -37,6 +41,24 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "helmet-detection-dev")
 
 _model: YOLO | None = None
+_job_queue: queue.Queue[str] = queue.Queue()
+_jobs: dict[str, "ProcessingJob"] = {}
+_jobs_lock = threading.Lock()
+_worker_started = False
+_active_job_id: str | None = None
+
+
+@dataclass
+class ProcessingJob:
+    id: str
+    input_path: Path
+    kind: str
+    confidence: float
+    rider_score_threshold: float
+    helmet_score_threshold: float
+    status: str = "queued"
+    result: dict[str, Any] | None = None
+    error: str | None = None
 
 
 def get_model() -> YOLO:
@@ -80,6 +102,13 @@ def threshold_from_form(field_name: str, default: float) -> float:
     except ValueError:
         return default
     return min(1.5, max(0.0, threshold))
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 def existing_upload_path(filename: str) -> Path:
@@ -134,7 +163,7 @@ def run_frame(
 
 def output_url(output_name: str, output_path: Path) -> str:
     version = output_path.stat().st_mtime_ns
-    return url_for("static", filename=f"outputs/{output_name}", v=version)
+    return f"/static/outputs/{output_name}?v={version}"
 
 
 def clear_previous_outputs(path: Path) -> None:
@@ -350,7 +379,15 @@ def merge_video_summary(current: dict[str, Any], analysis: dict[str, Any]) -> di
     return merged
 
 
-def encode_browser_video(source_path: Path, output_path: Path) -> None:
+def video_slowdown_factor() -> float:
+    return min(10.0, max(1.0, env_float("VIDEO_SLOWDOWN_FACTOR", DEFAULT_VIDEO_SLOWDOWN_FACTOR)))
+
+
+def encode_browser_video(source_path: Path, output_path: Path, slowdown_factor: float = 1.0) -> None:
+    filters = ["scale=trunc(iw/2)*2:trunc(ih/2)*2"]
+    if slowdown_factor > 1.0:
+        filters.insert(0, f"setpts={slowdown_factor:.6f}*PTS")
+
     command = [
         "ffmpeg",
         "-y",
@@ -358,7 +395,7 @@ def encode_browser_video(source_path: Path, output_path: Path) -> None:
         str(source_path),
         "-an",
         "-vf",
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        ",".join(filters),
         "-c:v",
         "libx264",
         "-preset",
@@ -396,7 +433,8 @@ def process_video(
         raise ValueError("Uploaded video has an invalid frame size.")
 
     clear_previous_outputs(path)
-    output_name = f"{path.stem}_detected.mp4"
+    slowdown_factor = video_slowdown_factor()
+    output_name = f"{path.stem}_detected_slow.mp4"
     raw_output_name = f"{path.stem}_detected_raw.mp4"
     output_path = OUTPUT_DIR / output_name
     raw_output_path = OUTPUT_DIR / raw_output_name
@@ -445,7 +483,7 @@ def process_video(
         raw_output_path.unlink(missing_ok=True)
         raise ValueError("Uploaded video did not contain readable frames.")
 
-    encode_browser_video(raw_output_path, output_path)
+    encode_browser_video(raw_output_path, output_path, slowdown_factor)
     raw_output_path.unlink(missing_ok=True)
 
     return {
@@ -458,57 +496,186 @@ def process_video(
         "summary": summary,
         "riders": representative_riders,
         "frame_count": frame_count,
+        "slowdown_factor": slowdown_factor,
     }
+
+
+def process_job(job: ProcessingJob) -> dict[str, Any]:
+    if job.kind == "image":
+        return process_image(
+            job.input_path,
+            job.confidence,
+            job.rider_score_threshold,
+            job.helmet_score_threshold,
+        )
+    return process_video(
+        job.input_path,
+        job.confidence,
+        job.rider_score_threshold,
+        job.helmet_score_threshold,
+    )
+
+
+def worker_loop() -> None:
+    global _active_job_id
+    while True:
+        job_id = _job_queue.get()
+        try:
+            with _jobs_lock:
+                job = _jobs.get(job_id)
+                if job is None:
+                    continue
+                job.status = "processing"
+                _active_job_id = job_id
+
+            try:
+                result = process_job(job)
+            except Exception as exc:
+                with _jobs_lock:
+                    job.status = "failed"
+                    job.error = str(exc)
+            else:
+                with _jobs_lock:
+                    job.status = "done"
+                    job.result = result
+        finally:
+            with _jobs_lock:
+                if _active_job_id == job_id:
+                    _active_job_id = None
+            _job_queue.task_done()
+
+
+def ensure_worker_started() -> None:
+    global _worker_started
+    with _jobs_lock:
+        if _worker_started:
+            return
+        worker = threading.Thread(target=worker_loop, name="media-processing-worker", daemon=True)
+        worker.start()
+        _worker_started = True
+
+
+def enqueue_job(
+    input_path: Path,
+    kind: str,
+    confidence: float,
+    rider_score_threshold: float,
+    helmet_score_threshold: float,
+) -> ProcessingJob:
+    ensure_worker_started()
+    job = ProcessingJob(
+        id=uuid.uuid4().hex,
+        input_path=input_path,
+        kind=kind,
+        confidence=confidence,
+        rider_score_threshold=rider_score_threshold,
+        helmet_score_threshold=helmet_score_threshold,
+    )
+    with _jobs_lock:
+        _jobs[job.id] = job
+    _job_queue.put(job.id)
+    return job
+
+
+def queued_job_ids() -> list[str]:
+    return [job_id for job_id, job in _jobs.items() if job.status == "queued"]
+
+
+def job_snapshot(job_id: str) -> dict[str, Any] | None:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return None
+        queued_ids = queued_job_ids()
+        queue_position = queued_ids.index(job_id) + 1 if job_id in queued_ids else 0
+        return {
+            "id": job.id,
+            "kind": job.kind,
+            "status": job.status,
+            "queue_position": queue_position,
+            "jobs_ahead": max(0, queue_position - 1),
+            "is_active": _active_job_id == job_id,
+            "error": job.error,
+            "result": job.result,
+        }
+
+
+def input_path_from_request() -> Path:
+    existing_file = request.form.get("existing_file", "")
+    uploaded_file = request.files.get("file")
+
+    if existing_file:
+        return existing_upload_path(existing_file)
+
+    if not uploaded_file or uploaded_file.filename == "":
+        raise ValueError("Choose an image or video file.")
+
+    if not allowed_file(uploaded_file.filename):
+        raise ValueError("Unsupported file type. Choose an image or video file.")
+
+    filename = f"{uuid.uuid4().hex}_{secure_filename(uploaded_file.filename)}"
+    input_path = UPLOAD_DIR / filename
+    uploaded_file.save(input_path)
+    return input_path
 
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    result = None
     model_ready = MODEL_PATH.exists()
 
     if request.method == "POST":
         confidence = confidence_from_form()
         rider_score_threshold = threshold_from_form("rider_score_threshold", RIDER_SCORE_THRESHOLD)
         helmet_score_threshold = threshold_from_form("helmet_score_threshold", HELMET_SCORE_THRESHOLD)
-        existing_file = request.form.get("existing_file", "")
-        uploaded_file = request.files.get("file")
-
         try:
-            if existing_file:
-                input_path = existing_upload_path(existing_file)
-            else:
-                if not uploaded_file or uploaded_file.filename == "":
-                    flash("Choose an image or video file.")
-                    return redirect(url_for("index"))
-
-                if not allowed_file(uploaded_file.filename):
-                    flash("Unsupported file type. Choose an image or video file.")
-                    return redirect(url_for("index"))
-
-                filename = f"{uuid.uuid4().hex}_{secure_filename(uploaded_file.filename)}"
-                input_path = UPLOAD_DIR / filename
-                uploaded_file.save(input_path)
-
+            input_path = input_path_from_request()
             kind = media_type(input_path)
-            if kind == "image":
-                result = process_image(
-                    input_path,
-                    confidence,
-                    rider_score_threshold,
-                    helmet_score_threshold,
-                )
-            else:
-                result = process_video(
-                    input_path,
-                    confidence,
-                    rider_score_threshold,
-                    helmet_score_threshold,
-                )
+            job = enqueue_job(
+                input_path,
+                kind,
+                confidence,
+                rider_score_threshold,
+                helmet_score_threshold,
+            )
         except Exception as exc:
             flash(str(exc))
             return redirect(url_for("index"))
 
-    return render_template("index.html", result=result, model_path=MODEL_PATH, model_ready=model_ready)
+        return redirect(url_for("job_page", job_id=job.id))
+
+    return render_template("index.html", result=None, job=None, model_path=MODEL_PATH, model_ready=model_ready)
+
+
+@app.route("/jobs/<job_id>")
+def job_page(job_id: str):
+    snapshot = job_snapshot(job_id)
+    if snapshot is None:
+        flash("Queued job was not found.")
+        return redirect(url_for("index"))
+
+    return render_template(
+        "index.html",
+        result=snapshot["result"] if snapshot["status"] == "done" else None,
+        job=snapshot,
+        model_path=MODEL_PATH,
+        model_ready=MODEL_PATH.exists(),
+    )
+
+
+@app.route("/jobs/<job_id>/status")
+def job_status(job_id: str):
+    snapshot = job_snapshot(job_id)
+    if snapshot is None:
+        return jsonify({"status": "missing", "error": "Queued job was not found."}), 404
+    return jsonify(
+        {
+            "status": snapshot["status"],
+            "queue_position": snapshot["queue_position"],
+            "jobs_ahead": snapshot["jobs_ahead"],
+            "is_active": snapshot["is_active"],
+            "error": snapshot["error"],
+        }
+    )
 
 
 if __name__ == "__main__":

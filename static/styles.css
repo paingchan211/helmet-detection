@@ -124,6 +124,16 @@ h2 {
   outline: none;
 }
 
+.drop-zone-disabled,
+.drop-zone-disabled:hover,
+.drop-zone-disabled:focus,
+.drop-zone-disabled.drag-over {
+  border-color: var(--line);
+  background: #eef2f6;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .drop-zone-title {
   color: var(--text);
   font-size: 24px;
@@ -206,6 +216,21 @@ button:disabled {
 .file-preview {
   min-height: 18px;
   overflow-wrap: anywhere;
+}
+
+.queue-panel {
+  width: min(720px, 100%);
+  margin: 18px auto;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.queue-panel p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-weight: 700;
 }
 
 .processing-state {
@@ -337,6 +362,17 @@ button:disabled {
   object-fit: contain;
   background: #101828;
   border-radius: 6px;
+}
+
+.media-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .detection-hotspot {

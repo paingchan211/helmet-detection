@@ -17,6 +17,7 @@ The app then does a second pass on top of the raw detections to decide:
 ## What The App Shows
 
 - annotated image or video output
+- queued processing so only one image or video runs through the model at a time
 - counts for riders, with helmet, without helmet, helmets, humans, and motorcycles
 - color legend for the bounding boxes
 - hover tooltips on images with labels and score details
@@ -43,6 +44,14 @@ python app.py
 ```
 
 By default, the app runs at `http://127.0.0.1:5001`.
+
+Processed videos are output at half speed by default. To change that, set
+`VIDEO_SLOWDOWN_FACTOR`; for example, `VIDEO_SLOWDOWN_FACTOR=3` makes the
+annotated video play three times slower.
+
+If another image or video is already being processed, new uploads are added to
+an in-memory queue. The status page shows the request's current queue position
+and refreshes automatically when the result is ready.
 
 ## How It Works
 
