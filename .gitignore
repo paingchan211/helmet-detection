@@ -28,6 +28,10 @@ models/*.onnx
 models/*.engine
 runs/
 training_runs/
+test_runs/
+test/
+exported_models/
+rules_evaluation/
 
 # Test and tool caches
 .pytest_cache/

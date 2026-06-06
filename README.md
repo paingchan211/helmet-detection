@@ -26,6 +26,7 @@ The app then does a second pass on top of the raw detections to decide:
 
 - a trained YOLOv8 model file named `best.pt`
 - `ffmpeg` installed and available on `PATH` if you want browser-playable processed video output
+- a `test` folder with matching image and label files under `test/images` and `test/labels` to run `pre_annotate.py`, `review_annotations.py`, `eval_compliance.py`, `generate_all_comparisons.py`, and `generate_report_images.py`
 
 ## Setup
 
