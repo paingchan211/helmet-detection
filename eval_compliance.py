@@ -70,8 +70,10 @@ def _iou(a: list[float], b: list[float]) -> float:
     ix1, iy1 = max(ax1, bx1), max(ay1, by1)
     ix2, iy2 = min(ax2, bx2), min(ay2, by2)
     inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-    union = (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter
-    return inter / union if union else 0.0
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    if union == 0:
+        return 0.0
+    return inter / union
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +136,12 @@ def match_riders(gt: list[dict], pred: list[dict]):
     return matches, matched_gt, matched_pred
 
 
+def safe_divide(numerator: float, denominator: float) -> float:
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+
+
 # ---------------------------------------------------------------------------
 # Per-model evaluation
 # ---------------------------------------------------------------------------
@@ -190,17 +198,17 @@ def evaluate_model(model_name: str) -> dict:
             else:                     helmet_tn += 1
 
     # --- Aggregate metrics ---
-    prec  = rider_tp / (rider_tp + rider_fp) if (rider_tp + rider_fp) else 0.0
-    rec   = rider_tp / (rider_tp + rider_fn) if (rider_tp + rider_fn) else 0.0
-    f1    = 2 * prec * rec / (prec + rec)    if (prec + rec)          else 0.0
+    prec = safe_divide(rider_tp, rider_tp + rider_fp)
+    rec = safe_divide(rider_tp, rider_tp + rider_fn)
+    f1 = safe_divide(2 * prec * rec, prec + rec)
 
-    matched      = rider_tp
-    helm_acc     = (helmet_tp + helmet_tn) / matched         if matched              else 0.0
-    false_safe   = helmet_fp / (helmet_fp + helmet_tn)       if (helmet_fp+helmet_tn) else 0.0
-    false_noh    = helmet_fn / (helmet_fn + helmet_tp)       if (helmet_fn+helmet_tp) else 0.0
-    helm_prec    = helmet_tp / (helmet_tp + helmet_fp)       if (helmet_tp+helmet_fp) else 0.0
-    helm_rec     = helmet_tp / (helmet_tp + helmet_fn)       if (helmet_tp+helmet_fn) else 0.0
-    helm_f1      = 2*helm_prec*helm_rec/(helm_prec+helm_rec) if (helm_prec+helm_rec)  else 0.0
+    matched = rider_tp
+    helm_acc = safe_divide(helmet_tp + helmet_tn, matched)
+    false_safe = safe_divide(helmet_fp, helmet_fp + helmet_tn)
+    false_noh = safe_divide(helmet_fn, helmet_fn + helmet_tp)
+    helm_prec = safe_divide(helmet_tp, helmet_tp + helmet_fp)
+    helm_rec = safe_divide(helmet_tp, helmet_tp + helmet_fn)
+    helm_f1 = safe_divide(2 * helm_prec * helm_rec, helm_prec + helm_rec)
 
     short = model_name.replace("helmet_data_", "").replace("_best.pt", "")
     print(
@@ -244,7 +252,10 @@ def main():
     print(f"Models              : {len(MODELS)}")
     print(f"Output CSV          : {OUTPUT_CSV}\n")
 
-    results = [evaluate_model(m) for m in MODELS]
+    results = []
+    for model_name in MODELS:
+        result = evaluate_model(model_name)
+        results.append(result)
 
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_CSV, "w", newline="") as fh:
@@ -259,7 +270,11 @@ def main():
     print(f"{'Model':<{w}} {'RiderP':>7} {'RiderR':>7} {'RiderF1':>8}"
           f" {'HelmAcc':>8} {'HelmF1':>7} {'FalSafe':>8} {'FalNoH':>8}")
     print("=" * 100)
-    for r in sorted(results, key=lambda x: x["rider_f1"], reverse=True):
+    def rider_f1(row: dict) -> float:
+        return row["rider_f1"]
+
+    sorted_results = sorted(results, key=rider_f1, reverse=True)
+    for r in sorted_results:
         print(
             f"{r['model']:<{w}}"
             f" {r['rider_precision']:>7.4f} {r['rider_recall']:>7.4f} {r['rider_f1']:>8.4f}"
@@ -267,7 +282,7 @@ def main():
             f" {r['false_safe_rate']:>8.4f} {r['false_noh_rate']:>8.4f}"
         )
 
-    best = max(results, key=lambda x: x["rider_f1"])
+    best = sorted_results[0]
     print(f"\nBest overall (rider F1): {best['model']}")
 
 

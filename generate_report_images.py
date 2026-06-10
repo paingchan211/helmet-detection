@@ -72,7 +72,9 @@ def _iou(a, b):
     ix2, iy2 = min(ax2, bx2), min(ay2, by2)
     inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
     union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
-    return inter / union if union else 0.0
+    if union == 0:
+        return 0.0
+    return inter / union
 
 
 def load_gt_boxes(label_path: Path, img_w: int, img_h: int):
@@ -95,11 +97,12 @@ def load_gt_boxes(label_path: Path, img_w: int, img_h: int):
 
 
 def load_gt_riders(gt_boxes):
-    return [
-        {"box": [x1, y1, x2, y2], "has_helmet": cls == 3}
-        for cls, x1, y1, x2, y2 in gt_boxes
-        if cls in (3, 4)
-    ]
+    riders = []
+    for cls, x1, y1, x2, y2 in gt_boxes:
+        if cls not in (3, 4):
+            continue
+        riders.append({"box": [x1, y1, x2, y2], "has_helmet": cls == 3})
+    return riders
 
 
 def _label(canvas, text, x1, y1, color):
@@ -120,21 +123,24 @@ def draw_gt_panel(image: np.ndarray, gt_boxes) -> np.ndarray:
             if is_rider != priority:
                 continue
             color = GT_COLORS.get(cls, (180, 180, 180))
-            thick = 3 if is_rider else 2
+            if is_rider:
+                thick = 3
+            else:
+                thick = 2
+
             cv2.rectangle(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, thick)
             _label(canvas, GT_LABEL_TEXT.get(cls, str(cls)), x1, y1, color)
     return canvas
 
 
 def compute_stats(gt_riders, pred_riders) -> dict:
-    pairs = sorted(
-        [
-            (_iou(gr["box"], pr["human"]["box"]), gi, pi)
-            for gi, gr in enumerate(gt_riders)
-            for pi, pr in enumerate(pred_riders)
-        ],
-        reverse=True,
-    )
+    pairs = []
+    for gt_index, gt_rider in enumerate(gt_riders):
+        for pred_index, pred_rider in enumerate(pred_riders):
+            iou = _iou(gt_rider["box"], pred_rider["human"]["box"])
+            pairs.append((iou, gt_index, pred_index))
+    pairs.sort(reverse=True)
+
     matched_gt, matched_pred, matches = set(), set(), []
     for iou, gi, pi in pairs:
         if iou < MATCH_IOU or gi in matched_gt or pi in matched_pred:

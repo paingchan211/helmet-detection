@@ -5,7 +5,6 @@ import queue
 import subprocess
 import threading
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +40,8 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "helmet-detection-dev")
 
 _model: YOLO | None = None
+# The app processes one upload at a time in a background worker.  The queue
+# stores job ids, while _jobs stores the full job details.
 _job_queue: queue.Queue[str] = queue.Queue()
 _jobs: dict[str, "ProcessingJob"] = {}
 _jobs_lock = threading.Lock()
@@ -48,17 +49,25 @@ _worker_started = False
 _active_job_id: str | None = None
 
 
-@dataclass
 class ProcessingJob:
-    id: str
-    input_path: Path
-    kind: str
-    confidence: float
-    rider_score_threshold: float
-    helmet_score_threshold: float
-    status: str = "queued"
-    result: dict[str, Any] | None = None
-    error: str | None = None
+    def __init__(
+        self,
+        id: str,
+        input_path: Path,
+        kind: str,
+        confidence: float,
+        rider_score_threshold: float,
+        helmet_score_threshold: float,
+    ) -> None:
+        self.id = id
+        self.input_path = input_path
+        self.kind = kind
+        self.confidence = confidence
+        self.rider_score_threshold = rider_score_threshold
+        self.helmet_score_threshold = helmet_score_threshold
+        self.status = "queued"
+        self.result: dict[str, Any] | None = None
+        self.error: str | None = None
 
 
 def get_model() -> YOLO:
@@ -178,7 +187,14 @@ def _box_key(box: list[float]) -> tuple[int, int, int, int]:
 
 
 def _box_kind(class_name: str) -> str:
-    kind = "".join(ch if ch.isalnum() else "-" for ch in class_name.lower()).strip("-")
+    characters = []
+    for ch in class_name.lower():
+        if ch.isalnum():
+            characters.append(ch)
+        else:
+            characters.append("-")
+
+    kind = "".join(characters).strip("-")
     return kind or "object"
 
 
@@ -186,12 +202,20 @@ def _display_class_name(class_name: str) -> str:
     return class_name.replace("_", " ").replace("-", " ").title()
 
 
+def _clamp(value: float, smallest: float, largest: float) -> float:
+    if value < smallest:
+        return smallest
+    if value > largest:
+        return largest
+    return value
+
+
 def _percent_box(box: list[float], width: int, height: int) -> dict[str, float]:
     x1, y1, x2, y2 = box
-    x1 = min(width, max(0.0, x1))
-    y1 = min(height, max(0.0, y1))
-    x2 = min(width, max(0.0, x2))
-    y2 = min(height, max(0.0, y2))
+    x1 = _clamp(x1, 0.0, width)
+    y1 = _clamp(y1, 0.0, height)
+    x2 = _clamp(x2, 0.0, width)
+    y2 = _clamp(y2, 0.0, height)
     return {
         "left": x1 / width * 100,
         "top": y1 / height * 100,
@@ -218,8 +242,19 @@ def _threshold_scales(
 ) -> tuple[float, float]:
     rider_scores = [float(human["rider_score"]) for human in human_scores]
     helmet_scores = [float(human["helmet_score"]) for human in human_scores]
-    rider_scale = max(1.0, rider_score_threshold * 1.15, *(score * 1.15 for score in rider_scores))
-    helmet_scale = max(1.0, helmet_score_threshold * 1.15, *(score * 1.15 for score in helmet_scores))
+
+    rider_scale = max(1.0, rider_score_threshold * 1.15)
+    for score in rider_scores:
+        scaled_score = score * 1.15
+        if scaled_score > rider_scale:
+            rider_scale = scaled_score
+
+    helmet_scale = max(1.0, helmet_score_threshold * 1.15)
+    for score in helmet_scores:
+        scaled_score = score * 1.15
+        if scaled_score > helmet_scale:
+            helmet_scale = scaled_score
+
     return rider_scale, helmet_scale
 
 
@@ -262,43 +297,43 @@ def hover_boxes_for_analysis(
         if det["class_name"] == "human" and box_key in rider_boxes:
             continue
         human_score = human_score_by_box.get(box_key)
-        hover_boxes.append(
-            {
-                **_percent_box(det["box"], width, height),
-                "label": f"{display_class} {det['confidence']:.2f}",
-                "kind": _box_kind(det["class_name"]),
-                "metrics": (
-                    _human_threshold_metrics(
-                        human_score,
-                        rider_scale,
-                        helmet_scale,
-                        rider_score_threshold,
-                        helmet_score_threshold,
-                    )
-                    if human_score
-                    else []
-                ),
-            }
-        )
+        hover_box = _percent_box(det["box"], width, height)
+        hover_box["label"] = f"{display_class} {det['confidence']:.2f}"
+        hover_box["kind"] = _box_kind(det["class_name"])
+        if human_score:
+            hover_box["metrics"] = _human_threshold_metrics(
+                human_score,
+                rider_scale,
+                helmet_scale,
+                rider_score_threshold,
+                helmet_score_threshold,
+            )
+        else:
+            hover_box["metrics"] = []
+        hover_boxes.append(hover_box)
 
     for rider in analysis["riders"]:
         human = rider["human"]
-        status = "Helmet" if rider["wearing_helmet"] else "Without Helmet"
+        if rider["wearing_helmet"]:
+            status = "Helmet"
+        else:
+            status = "Without Helmet"
+
         human_score = human_score_by_box[_box_key(human["box"])]
-        hover_boxes.append(
-            {
-                **_percent_box(human["box"], width, height),
-                "label": f"Rider: {status}",
-                "kind": "rider-safe" if rider["wearing_helmet"] else "rider-danger",
-                "metrics": _human_threshold_metrics(
-                    human_score,
-                    rider_scale,
-                    helmet_scale,
-                    rider_score_threshold,
-                    helmet_score_threshold,
-                ),
-            }
+        hover_box = _percent_box(human["box"], width, height)
+        hover_box["label"] = f"Rider: {status}"
+        if rider["wearing_helmet"]:
+            hover_box["kind"] = "rider-safe"
+        else:
+            hover_box["kind"] = "rider-danger"
+        hover_box["metrics"] = _human_threshold_metrics(
+            human_score,
+            rider_scale,
+            helmet_scale,
+            rider_score_threshold,
+            helmet_score_threshold,
         )
+        hover_boxes.append(hover_box)
 
     return hover_boxes
 
@@ -358,12 +393,15 @@ def merge_video_summary(current: dict[str, Any], analysis: dict[str, Any]) -> di
     merged = current.copy()
     for key in ("detection_count", "riders", "with_helmet", "without_helmet", "helmets", "humans", "motorcycles"):
         merged[key] = max(merged[key], frame_summary[key])
-    merged["risk_level"] = "High" if merged["without_helmet"] else "Low"
-    merged["compliance_percent"] = (
-        round((merged["with_helmet"] / merged["riders"]) * 100, 1)
-        if merged["riders"]
-        else 0.0
-    )
+    if merged["without_helmet"]:
+        merged["risk_level"] = "High"
+    else:
+        merged["risk_level"] = "Low"
+
+    if merged["riders"]:
+        merged["compliance_percent"] = round((merged["with_helmet"] / merged["riders"]) * 100, 1)
+    else:
+        merged["compliance_percent"] = 0.0
     merged["average_confidence"] = max(
         merged["average_confidence"],
         frame_summary["average_confidence"],
@@ -411,7 +449,10 @@ def encode_browser_video(source_path: Path, output_path: Path, slowdown_factor: 
     completed = subprocess.run(command, capture_output=True, text=True)
     if completed.returncode != 0:
         message = completed.stderr.strip().splitlines()
-        detail = message[-1] if message else "unknown ffmpeg error"
+        if message:
+            detail = message[-1]
+        else:
+            detail = "unknown ffmpeg error"
         raise ValueError(f"Could not encode browser-playable video: {detail}")
 
 
@@ -508,12 +549,13 @@ def process_job(job: ProcessingJob) -> dict[str, Any]:
             job.rider_score_threshold,
             job.helmet_score_threshold,
         )
-    return process_video(
-        job.input_path,
-        job.confidence,
-        job.rider_score_threshold,
-        job.helmet_score_threshold,
-    )
+    else:
+        return process_video(
+            job.input_path,
+            job.confidence,
+            job.rider_score_threshold,
+            job.helmet_score_threshold,
+        )
 
 
 def worker_loop() -> None:
@@ -578,7 +620,11 @@ def enqueue_job(
 
 
 def queued_job_ids() -> list[str]:
-    return [job_id for job_id, job in _jobs.items() if job.status == "queued"]
+    queued_ids = []
+    for job_id, job in _jobs.items():
+        if job.status == "queued":
+            queued_ids.append(job_id)
+    return queued_ids
 
 
 def job_snapshot(job_id: str) -> dict[str, Any] | None:
@@ -587,7 +633,11 @@ def job_snapshot(job_id: str) -> dict[str, Any] | None:
         if job is None:
             return None
         queued_ids = queued_job_ids()
-        queue_position = queued_ids.index(job_id) + 1 if job_id in queued_ids else 0
+        if job_id in queued_ids:
+            queue_position = queued_ids.index(job_id) + 1
+        else:
+            queue_position = 0
+
         return {
             "id": job.id,
             "kind": job.kind,
@@ -653,9 +703,14 @@ def job_page(job_id: str):
         flash("Queued job was not found.")
         return redirect(url_for("index"))
 
+    if snapshot["status"] == "done":
+        result = snapshot["result"]
+    else:
+        result = None
+
     return render_template(
         "index.html",
-        result=snapshot["result"] if snapshot["status"] == "done" else None,
+        result=result,
         job=snapshot,
         model_path=MODEL_PATH,
         model_ready=MODEL_PATH.exists(),

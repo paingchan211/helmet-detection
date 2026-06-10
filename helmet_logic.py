@@ -102,7 +102,9 @@ def _intersection(a: list[float], b: list[float]) -> float:
 def _iou(a: list[float], b: list[float]) -> float:
     inter = _intersection(a, b)
     union = _area(a) + _area(b) - inter
-    return inter / union if union else 0.0
+    if union == 0:
+        return 0.0
+    return inter / union
 
 
 def _expand(
@@ -146,7 +148,9 @@ def _helmet_score(head_box: list[float], helmet_box: list[float]) -> float:
         and head_box[1] <= hc[1] <= head_box[3]
     )
     overlap = _intersection(head_box, helmet_box) / max(1.0, _area(helmet_box))
-    return overlap + (HELMET_POSITION_BONUS if in_head else 0.0)
+    if in_head:
+        return overlap + HELMET_POSITION_BONUS
+    return overlap
 
 
 def _draw_label(
@@ -193,14 +197,20 @@ def _nms(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return detections
 
     # Sort descending by confidence so we always keep the best box.
-    sorted_dets = sorted(detections, key=lambda d: d["confidence"], reverse=True)
+    def confidence_value(detection: dict[str, Any]) -> float:
+        return detection["confidence"]
+
+    sorted_dets = sorted(detections, key=confidence_value, reverse=True)
     kept: list[dict[str, Any]] = []
 
     for candidate in sorted_dets:
-        suppressed = any(
-            _iou(candidate["box"], kept_det["box"]) > NMS_IOU_THRESHOLD
-            for kept_det in kept
-        )
+        suppressed = False
+        for kept_det in kept:
+            overlap = _iou(candidate["box"], kept_det["box"])
+            if overlap > NMS_IOU_THRESHOLD:
+                suppressed = True
+                break
+
         if not suppressed:
             kept.append(candidate)
 
@@ -230,7 +240,10 @@ def _normalise(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         box = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
         if _area(box) <= 0:
             continue
-        normalised.append({**det, "class_name": class_name, "box": box})
+        clean_detection = det.copy()
+        clean_detection["class_name"] = class_name
+        clean_detection["box"] = box
+        normalised.append(clean_detection)
     return normalised
 
 
@@ -309,15 +322,26 @@ def analyze_detections(
     # Group by class for NMS, then flatten back.
     class_groups: dict[str, list[dict[str, Any]]] = {}
     for det in detections:
-        class_groups.setdefault(det["class_name"], []).append(det)
+        class_name = det["class_name"]
+        if class_name not in class_groups:
+            class_groups[class_name] = []
+        class_groups[class_name].append(det)
 
     deduped: list[dict[str, Any]] = []
     for class_name, group in class_groups.items():
         deduped.extend(_nms(group))
 
-    helmets = [d for d in deduped if d["class_name"] == HELMET_CLASS]
-    humans = [d for d in deduped if d["class_name"] == HUMAN_CLASS]
-    motorcycles = [d for d in deduped if d["class_name"] == MOTORCYCLE_CLASS]
+    helmets = []
+    humans = []
+    motorcycles = []
+    for detection in deduped:
+        class_name = detection["class_name"]
+        if class_name == HELMET_CLASS:
+            helmets.append(detection)
+        elif class_name == HUMAN_CLASS:
+            humans.append(detection)
+        elif class_name == MOTORCYCLE_CLASS:
+            motorcycles.append(detection)
 
     # --- 2. Associate humans with motorcycles ---
     # A motorcycle can carry multiple people, so do not remove it after a
@@ -338,10 +362,12 @@ def analyze_detections(
                 best_score = score
                 best_motorcycle = motorcycle
 
-        best_helmet_score = max(
-            (_helmet_score(head_box, helmet["box"]) for helmet in helmets),
-            default=0.0,
-        )
+        best_helmet_score = 0.0
+        for helmet in helmets:
+            score = _helmet_score(head_box, helmet["box"])
+            if score > best_helmet_score:
+                best_helmet_score = score
+
         human_scores.append(
             {
                 "id": index,
@@ -399,6 +425,14 @@ def analyze_detections(
         assigned_rider_indices.add(rider_idx)
         assigned_helmet_indices.add(helmet_idx)
 
+    riders_with_helmet = 0
+    riders_without_helmet = 0
+    for rider in riders:
+        if rider["wearing_helmet"]:
+            riders_with_helmet += 1
+        else:
+            riders_without_helmet += 1
+
     return {
         "detections": deduped,
         "riders": riders,
@@ -408,8 +442,8 @@ def analyze_detections(
             "humans": len(humans),
             "motorcycles": len(motorcycles),
             "riders": len(riders),
-            "with_helmet": sum(1 for r in riders if r["wearing_helmet"]),
-            "without_helmet": sum(1 for r in riders if not r["wearing_helmet"]),
+            "with_helmet": riders_with_helmet,
+            "without_helmet": riders_without_helmet,
         },
         "thresholds": {
             "rider_score": rider_score_threshold,
@@ -439,18 +473,25 @@ def summarize_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         else 0.0
     )
 
-    return {
-        **counts,
-        "detection_count": len(detections),
-        "average_confidence": (
-            round(sum(confidences) / len(confidences) * 100, 1) if confidences else 0.0
-        ),
-        "lowest_confidence": (
-            round(min(confidences) * 100, 1) if confidences else 0.0
-        ),
-        "compliance_percent": compliance,
-        "risk_level": "High" if counts["without_helmet"] else "Low",
-    }
+    if confidences:
+        average_confidence = round(sum(confidences) / len(confidences) * 100, 1)
+        lowest_confidence = round(min(confidences) * 100, 1)
+    else:
+        average_confidence = 0.0
+        lowest_confidence = 0.0
+
+    if counts["without_helmet"]:
+        risk_level = "High"
+    else:
+        risk_level = "Low"
+
+    summary = counts.copy()
+    summary["detection_count"] = len(detections)
+    summary["average_confidence"] = average_confidence
+    summary["lowest_confidence"] = lowest_confidence
+    summary["compliance_percent"] = compliance
+    summary["risk_level"] = risk_level
+    return summary
 
 
 # ===========================================================================
@@ -501,10 +542,18 @@ def draw_analysis(
     for rider in analysis["riders"]:
         x1, y1, x2, y2 = (int(v) for v in rider["human"]["box"])
         wearing = rider["wearing_helmet"]
-        color = COLOR_RIDER_SAFE if wearing else COLOR_RIDER_DANGER
+        if wearing:
+            color = COLOR_RIDER_SAFE
+        else:
+            color = COLOR_RIDER_DANGER
+
         cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 4)
         if show_labels:
-            status = "HELMET" if wearing else "WITHOUT HELMET"
+            if wearing:
+                status = "HELMET"
+            else:
+                status = "WITHOUT HELMET"
+
             _draw_label(
                 canvas,
                 status,

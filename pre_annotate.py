@@ -16,7 +16,10 @@ Output: test/labels_annotated/  (original files are not overwritten)
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
+
+import cv2
 
 ROOT        = Path(__file__).parent
 SRC_LABELS  = ROOT / "test" / "labels"
@@ -32,7 +35,6 @@ CLS_RIDER_NOH   = 4   # rider without helmet
 
 CLASS_NAMES = ["helmet", "human", "motorcycle"]
 
-import sys
 sys.path.insert(0, str(ROOT))
 from helmet_logic import (
     _rider_score, _head_region, _helmet_score,
@@ -67,8 +69,13 @@ def parse_label_row(line: str):
     if len(parts) >= 7 and len(parts) % 2 == 1:
         cls = int(parts[0])
         coords = [float(value) for value in parts[1:]]
-        xs = coords[::2]
-        ys = coords[1::2]
+        xs = []
+        ys = []
+        for index, value in enumerate(coords):
+            if index % 2 == 0:
+                xs.append(value)
+            else:
+                ys.append(value)
         x1, x2 = min(xs), max(xs)
         y1, y2 = min(ys), max(ys)
         return (cls, (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1)
@@ -77,36 +84,12 @@ def parse_label_row(line: str):
 
 
 def get_image_size(img_path: Path):
-    import struct, zlib
-    suffix = img_path.suffix.lower()
-    if suffix == ".png":
-        with open(img_path, "rb") as f:
-            f.read(8)
-            f.read(4)
-            assert f.read(4) == b"IHDR"
-            w = struct.unpack(">I", f.read(4))[0]
-            h = struct.unpack(">I", f.read(4))[0]
-        return w, h
-    else:
-        # JPEG: scan for SOF marker
-        with open(img_path, "rb") as f:
-            data = f.read()
-        i = 0
-        while i < len(data) - 1:
-            if data[i] != 0xFF:
-                i += 1
-                continue
-            marker = data[i + 1]
-            if marker in (0xC0, 0xC1, 0xC2):
-                h = struct.unpack(">H", data[i+5:i+7])[0]
-                w = struct.unpack(">H", data[i+7:i+9])[0]
-                return w, h
-            elif marker in (0xD8, 0xD9, 0x01) or (0xD0 <= marker <= 0xD7):
-                i += 2
-            else:
-                length = struct.unpack(">H", data[i+2:i+4])[0]
-                i += 2 + length
-        return 640, 640  # fallback
+    image = cv2.imread(str(img_path))
+    if image is None:
+        return 640, 640
+
+    img_h, img_w = image.shape[:2]
+    return img_w, img_h
 
 
 def pre_annotate_file(label_path: Path, img_path: Path) -> list[str]:
@@ -120,31 +103,41 @@ def pre_annotate_file(label_path: Path, img_path: Path) -> list[str]:
         if row is not None:
             rows.append(row)
 
-    helmets    = [yolo_to_pixel(cx, cy, bw, bh, img_w, img_h)
-                  for cls, cx, cy, bw, bh in rows if cls == CLS_HELMET]
-    humans     = [(yolo_to_pixel(cx, cy, bw, bh, img_w, img_h), (cx, cy, bw, bh))
-                  for cls, cx, cy, bw, bh in rows if cls == CLS_HUMAN]
-    motorcycles = [yolo_to_pixel(cx, cy, bw, bh, img_w, img_h)
-                   for cls, cx, cy, bw, bh in rows if cls == CLS_MOTORCYCLE]
+    helmets = []
+    humans = []
+    motorcycles = []
+    for cls, cx, cy, bw, bh in rows:
+        pixel_box = yolo_to_pixel(cx, cy, bw, bh, img_w, img_h)
+        if cls == CLS_HELMET:
+            helmets.append(pixel_box)
+        elif cls == CLS_HUMAN:
+            yolo_coords = (cx, cy, bw, bh)
+            humans.append((pixel_box, yolo_coords))
+        elif cls == CLS_MOTORCYCLE:
+            motorcycles.append(pixel_box)
 
     new_classes: dict[tuple, int] = {}  # yolo coords → new class id
 
     for box_px, yolo_coords in humans:
         # Find best motorcycle match
-        best_rscore = max(
-            (_rider_score(box_px, mbox) for mbox in motorcycles),
-            default=0.0,
-        )
+        best_rscore = 0.0
+        for motorcycle_box in motorcycles:
+            score = _rider_score(box_px, motorcycle_box)
+            if score > best_rscore:
+                best_rscore = score
+
         if best_rscore < RIDER_SCORE_THRESHOLD:
             new_classes[yolo_coords] = CLS_HUMAN
             continue
 
         # It's a rider — check for helmet
         head = _head_region(box_px)
-        best_hscore = max(
-            (_helmet_score(head, hbox) for hbox in helmets),
-            default=0.0,
-        )
+        best_hscore = 0.0
+        for helmet_box in helmets:
+            score = _helmet_score(head, helmet_box)
+            if score > best_hscore:
+                best_hscore = score
+
         if best_hscore >= HELMET_SCORE_THRESHOLD:
             new_classes[yolo_coords] = CLS_RIDER_HELM
         else:
@@ -169,11 +162,13 @@ def main():
 
     for lf in label_files:
         stem = lf.stem
-        img_path = next(
-            (SRC_IMAGES / (stem + ext) for ext in (".jpg", ".jpeg", ".png")
-             if (SRC_IMAGES / (stem + ext)).exists()),
-            None,
-        )
+        img_path = None
+        for ext in (".jpg", ".jpeg", ".png"):
+            possible_path = SRC_IMAGES / (stem + ext)
+            if possible_path.exists():
+                img_path = possible_path
+                break
+
         if img_path is None:
             shutil.copy(lf, DST_LABELS / lf.name)
             continue
@@ -186,7 +181,6 @@ def main():
             if c in counts:
                 counts[c] += 1
 
-    total = sum(counts.values())
     print(f"Pre-annotation complete: {DST_LABELS}")
     print(f"  {len(label_files)} files processed")
     print(f"  Humans classified:")

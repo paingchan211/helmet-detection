@@ -104,7 +104,11 @@ def draw(image: np.ndarray, boxes: list, scale: float) -> np.ndarray:
         sx1, sy1 = int(x1 * scale), int(y1 * scale)
         sx2, sy2 = int(x2 * scale), int(y2 * scale)
         color = COLORS.get(cls, (200, 200, 200))
-        thick = 3 if cls in (CLS_RIDER_HELM, CLS_RIDER_NOH) else 2
+        if cls in (CLS_RIDER_HELM, CLS_RIDER_NOH):
+            thick = 3
+        else:
+            thick = 2
+
         cv2.rectangle(canvas, (sx1, sy1), (sx2, sy2), color, thick)
         label = CLS_NAMES.get(cls, str(cls))
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
@@ -133,12 +137,13 @@ def hit_box(mx: int, my: int, boxes: list, scale: float) -> int | None:
 # Mouse callback state
 # ---------------------------------------------------------------------------
 
-_click: list[tuple[int, int] | None] = [None]
+_click_position: tuple[int, int] | None = None
 
 
 def _on_mouse(event, x, y, flags, param):
+    global _click_position
     if event == cv2.EVENT_LBUTTONDOWN:
-        _click[0] = (x, y)
+        _click_position = (x, y)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +151,8 @@ def _on_mouse(event, x, y, flags, param):
 # ---------------------------------------------------------------------------
 
 def main():
+    global _click_position
+
     if not SRC_LABELS.exists():
         print("labels_annotated/ not found. Run  python pre_annotate.py  first.")
         sys.exit(1)
@@ -187,7 +194,7 @@ def main():
                 cache[idx] = []
 
         boxes = cache[idx]
-        _click[0] = None
+        _click_position = None
         needs_redraw = True
 
         while True:
@@ -195,9 +202,18 @@ def main():
                 frame = draw(img_display, boxes, scale)
                 # Status bar
                 total = len(image_files)
-                n_rh = sum(1 for b in boxes if b[0] == CLS_RIDER_HELM)
-                n_rn = sum(1 for b in boxes if b[0] == CLS_RIDER_NOH)
-                n_p  = sum(1 for b in boxes if b[0] == CLS_HUMAN)
+                n_rh = 0
+                n_rn = 0
+                n_p = 0
+                for box in boxes:
+                    class_id = box[0]
+                    if class_id == CLS_RIDER_HELM:
+                        n_rh += 1
+                    elif class_id == CLS_RIDER_NOH:
+                        n_rn += 1
+                    elif class_id == CLS_HUMAN:
+                        n_p += 1
+
                 status = (f"  {idx+1}/{total}  {img_path.name}"
                           f"   riders+helm={n_rh}  riders-noh={n_rn}  pedestrian={n_p}"
                           f"   ENTER=accept  CLICK=cycle class  BACK=prev  Q=quit")
@@ -212,10 +228,10 @@ def main():
             key = cv2.waitKey(30) & 0xFF
 
             # Handle click
-            if _click[0] is not None:
-                mx, my = _click[0]
+            if _click_position is not None:
+                mx, my = _click_position
                 my -= 32  # subtract status bar height
-                _click[0] = None
+                _click_position = None
                 hit = hit_box(mx, my, boxes, scale)
                 if hit is not None:
                     cur_cls = boxes[hit][0]
