@@ -550,9 +550,9 @@ def draw_analysis(
         cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 4)
         if show_labels:
             if wearing:
-                status = "HELMET"
+                status = "RIDER WITH HELMET"
             else:
-                status = "WITHOUT HELMET"
+                status = "RIDER WITHOUT HELMET"
 
             _draw_label(
                 canvas,

@@ -315,13 +315,13 @@ def hover_boxes_for_analysis(
     for rider in analysis["riders"]:
         human = rider["human"]
         if rider["wearing_helmet"]:
-            status = "Helmet"
+            status = "Rider With Helmet"
         else:
-            status = "Without Helmet"
+            status = "Rider Without Helmet"
 
         human_score = human_score_by_box[_box_key(human["box"])]
         hover_box = _percent_box(human["box"], width, height)
-        hover_box["label"] = f"Rider: {status}"
+        hover_box["label"] = status
         if rider["wearing_helmet"]:
             hover_box["kind"] = "rider-safe"
         else:
